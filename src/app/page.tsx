@@ -246,7 +246,7 @@ export default function Home() {
                 <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-4 py-2 bg-zinc-950 rounded-xl border border-zinc-800 text-zinc-100 outline-none focus:border-blue-500 text-sm" placeholder="••••••••" required />
               </div>
               <button type="submit" disabled={isLoading} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-xl transition text-sm disabled:opacity-50 cursor-pointer">
-                {isLoading ? 'Accessing Secure Pipeline...' : 'Sign In / Register'}
+                {isLoading ? 'loading...' : 'Sign In / Register'}
               </button>
             </form>
           </div>
@@ -320,7 +320,7 @@ export default function Home() {
                 <div className="min-w-0">
                   <h3 className="font-bold text-sm text-zinc-100 capitalize truncate">{activeContact?.name || 'Select Portal Contact'}</h3>
                   <p className="text-[11px] text-zinc-400 mt-0.5">
-                    {isPartnerTypingNow ? <span className="text-blue-400 animate-pulse font-medium">is typing...</span> : 'Cloud Channel Active'}
+                    {isPartnerTypingNow ? <span className="text-blue-400 animate-pulse font-medium">is typing...</span> : 'Active'}
                   </p>
                 </div>
               </div>
