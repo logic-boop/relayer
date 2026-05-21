@@ -1,11 +1,10 @@
 'use client';
 
-import { useState, useEffect, useRef, useMemo } from 'react';
-import { Sun, Moon, MessageCircle, Send, LogOut, Phone, Video, Info, Circle, Menu } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { MessageCircle, Send, LogOut, Phone, Video, Info, Circle, Menu, X } from 'lucide-react';
 import Pusher from 'pusher-js';
 
 interface Contact {
-  id: string;
   name: string;
   status: string;
   avatar: string;
@@ -21,17 +20,8 @@ interface Message {
 
 type ChatHistory = Record<string, Message[]>;
 
-const MOCK_CONTACTS: Contact[] = [
-  { id: '1', name: 'frank', status: 'Active now', avatar: 'F' },
-  { id: '2', name: 'jemad', status: 'Away', avatar: 'J' },
-  { id: '3', name: 'diva', status: 'Active 5m ago', avatar: 'D' },
-  { id: '4', name: 'tosin', status: 'Active now', avatar: 'T' },
-];
-
 export default function Home() {
   const [hasMounted, setHasMounted] = useState(false);
-  const [darkMode, setDarkMode] = useState(true);
-  
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -40,51 +30,67 @@ export default function Home() {
   const [newMessageText, setNewMessageText] = useState('');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [chatHistory, setChatHistory] = useState<ChatHistory>({});
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [activeContact, setActiveContact] = useState<Contact | null>(null);
   
-  // Option C: Tracking typing state indicators
   const [partnerTyping, setPartnerTyping] = useState<Record<string, boolean>>({});
   const typingTimeoutRef = useRef<Record<string, NodeJS.Timeout>>({});
   const isCurrentlyTypingSent = useRef(false);
-
-  const contacts = useMemo(() => {
-    return MOCK_CONTACTS.filter((contact) => contact.name !== currentUser);
-  }, [currentUser]);
-
-  const [activeContact, setActiveContact] = useState<Contact | null>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!activeContact && contacts.length > 0) setActiveContact(contacts[0]);
-  }, [contacts, activeContact]);
 
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory, activeContact, partnerTyping]);
 
-  // Initial Sync Logic on mount
   useEffect(() => {
     setHasMounted(true);
-    document.documentElement.classList.add('dark');
     const session = localStorage.getItem('relayer_session');
     if (session) {
       const activeUser = session.toLowerCase().trim();
       setCurrentUser(activeUser);
-      fetchCloudHistory(activeUser);
+      bootstrapSession(activeUser);
     }
   }, []);
 
-  // Fetch real database records from Supabase via Next.js backend pipeline
+  const bootstrapSession = async (user: string) => {
+    await fetchDirectory(user);
+    await fetchCloudHistory(user);
+  };
+
+  // Fetch real registered dynamic profiles from Supabase
+  const fetchDirectory = async (current: string) => {
+    try {
+      const res = await fetch('/api/users');
+      const data = await res.json();
+      if (data.users) {
+        const mapped: Contact[] = data.users
+          .filter((u: any) => u.username !== current)
+          .map((u: any) => ({
+            name: u.username,
+            status: 'Registered User',
+            avatar: u.username.charAt(0).toUpperCase()
+          }));
+        setContacts(mapped);
+        if (mapped.length > 0 && !activeContact) {
+          setActiveContact(mapped[0]);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const fetchCloudHistory = async (user: string) => {
     try {
       const res = await fetch(`/api/messages?user=${user}`);
       const data = await res.json();
       if (data.history) setChatHistory(data.history);
     } catch (err) {
-      console.error('Failed fetching database cloud logs:', err);
+      console.error(err);
     }
   };
 
-  // Real-time Event Subscription Binders
+  // Pusher Real-Time listeners
   useEffect(() => {
     if (!currentUser) return;
 
@@ -94,25 +100,21 @@ export default function Home() {
 
     const channel = pusherClient.subscribe('chat-room');
 
-    // Handle Incoming Messages
     channel.bind('new-message', (incomingMessage: Message) => {
-      if (incomingMessage.receiver !== currentUser || incomingMessage.sender === currentUser) return;
+      if (incomingMessage.receiver !== currentUser && incomingMessage.sender !== currentUser) return;
 
       setChatHistory((prev) => {
-        const partner = incomingMessage.sender;
+        const partner = incomingMessage.sender === currentUser ? incomingMessage.receiver : incomingMessage.sender;
         const currentThread = prev[partner] || [];
         if (currentThread.some((m) => m.id === incomingMessage.id)) return prev;
         return { ...prev, [partner]: [...currentThread, incomingMessage] };
       });
     });
 
-    // Handle Incoming Typing Indicators (Option C)
     channel.bind('user-typing', (data: { sender: string; receiver: string; isTyping: boolean }) => {
       if (data.receiver !== currentUser) return;
-      
       setPartnerTyping((prev) => ({ ...prev, [data.sender]: data.isTyping }));
 
-      // Fallback timeout to clear state if the user stops typing abruptly or disconnects
       if (data.isTyping) {
         if (typingTimeoutRef.current[data.sender]) clearTimeout(typingTimeoutRef.current[data.sender]);
         typingTimeoutRef.current[data.sender] = setTimeout(() => {
@@ -128,7 +130,6 @@ export default function Home() {
     };
   }, [currentUser]);
 
-  // Transmit Typing State Changes (Option C)
   const sendTypingSignal = async (isTyping: boolean) => {
     if (!currentUser || !activeContact || isCurrentlyTypingSent.current === isTyping) return;
     isCurrentlyTypingSent.current = isTyping;
@@ -148,24 +149,36 @@ export default function Home() {
     setNewMessageText(text);
     if (text.trim().length > 0) {
       sendTypingSignal(true);
-      // Automatically toggle typing state off after 2 seconds of silence
-      const timer = setTimeout(() => sendTypingSignal(false), 2000);
-      return () => clearTimeout(timer);
     } else {
       sendTypingSignal(false);
     }
   };
 
-  const handleAuthSubmit = (e: React.FormEvent) => {
+  const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!username.trim() || !password.trim()) return;
+    if (!username.trim()) return;
 
     setIsLoading(true);
     const sanitizedUser = username.toLowerCase().trim();
-    localStorage.setItem('relayer_session', sanitizedUser);
-    setCurrentUser(sanitizedUser);
-    fetchCloudHistory(sanitizedUser);
-    setIsLoading(false);
+
+    try {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: sanitizedUser }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        localStorage.setItem('relayer_session', sanitizedUser);
+        setCurrentUser(sanitizedUser);
+        await bootstrapSession(sanitizedUser);
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleLogout = () => {
@@ -174,13 +187,14 @@ export default function Home() {
     setUsername('');
     setPassword('');
     setActiveContact(null);
+    setContacts([]);
     setChatHistory({});
   };
 
   const handleSendMessage = async () => {
     if (!newMessageText.trim() || !currentUser || !activeContact) return;
 
-    sendTypingSignal(false); // Kill typing signal instantly on submit
+    sendTypingSignal(false);
     const typedText = newMessageText.trim();
     const targetPartner = activeContact.name;
 
@@ -191,11 +205,6 @@ export default function Home() {
       text: typedText,
       timestamp: new Date().toISOString(),
     };
-
-    setChatHistory((prev) => ({
-      ...prev,
-      [targetPartner]: [...(prev[targetPartner] || []), messagePayload],
-    }));
 
     setNewMessageText('');
 
@@ -216,114 +225,122 @@ export default function Home() {
   const isPartnerTypingNow = activeContact ? partnerTyping[activeContact.name] : false;
 
   return (
-    <div className="h-screen w-full flex flex-col bg-zinc-950 text-zinc-100 antialiased">
+    <div className="h-screen w-full flex flex-col bg-zinc-950 text-zinc-100 antialiased overflow-hidden">
       {!currentUser ? (
-        <div className="flex-1 flex flex-col items-center justify-center p-6 bg-zinc-950">
-          <div className="w-full max-w-md bg-zinc-900 p-8 rounded-3xl border border-zinc-800">
+        <div className="flex-1 flex flex-col items-center justify-center p-4 bg-zinc-950">
+          <div className="w-full max-w-sm bg-zinc-900 p-6 sm:p-8 rounded-3xl border border-zinc-800">
             <div className="flex flex-col items-center mb-6">
-              <div className="bg-blue-600 p-3.5 rounded-2xl text-white mb-3 shadow-md shadow-blue-500/20">
-                <MessageCircle size={32} />
+              <div className="bg-blue-600 p-3 rounded-2xl text-white mb-3">
+                <MessageCircle size={28} />
               </div>
-              <h2 className="text-2xl font-bold tracking-tight">Log into Relayer</h2>
+              <h2 className="text-xl font-bold tracking-tight">Sign inside Relayer</h2>
+              <p className="text-xs text-zinc-400 mt-1 text-center">Enter any username. If it doesn't exist, we will register it instantly!</p>
             </div>
             <form onSubmit={handleAuthSubmit} className="space-y-4">
               <div>
-                <label className="text-xs font-semibold uppercase tracking-wider block mb-1 text-zinc-400">Username</label>
-                <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} className="w-full px-4 py-2.5 rounded-xl border border-zinc-700 bg-transparent text-zinc-100 outline-none focus:ring-2 focus:ring-blue-500" placeholder="e.g. tosin or frank" required />
+                <label className="text-xs font-semibold uppercase block mb-1 text-zinc-400">Username</label>
+                <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} className="w-full px-4 py-2 bg-zinc-950 rounded-xl border border-zinc-800 text-zinc-100 outline-none focus:border-blue-500 text-sm" placeholder="e.g. tosin, frank, charity" required />
               </div>
               <div>
-                <label className="text-xs font-semibold uppercase tracking-wider block mb-1 text-zinc-400">Password</label>
-                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-4 py-2.5 rounded-xl border border-zinc-700 bg-transparent text-zinc-100 outline-none focus:ring-2 focus:ring-blue-500" placeholder="••••••••" required />
+                <label className="text-xs font-semibold uppercase block mb-1 text-zinc-400">Password</label>
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-4 py-2 bg-zinc-950 rounded-xl border border-zinc-800 text-zinc-100 outline-none focus:border-blue-500 text-sm" placeholder="••••••••" required />
               </div>
-              <button type="submit" disabled={isLoading} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-xl mt-2 transition disabled:opacity-50 cursor-pointer">
-                {isLoading ? 'Connecting...' : 'Sign In'}
+              <button type="submit" disabled={isLoading} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-xl transition text-sm disabled:opacity-50 cursor-pointer">
+                {isLoading ? 'Accessing Secure Pipeline...' : 'Sign In / Register'}
               </button>
             </form>
           </div>
         </div>
       ) : (
-        <div className="flex-1 flex overflow-hidden relative">
-          {mobileSidebarOpen && <div onClick={() => setMobileSidebarOpen(false)} className="fixed inset-0 bg-black/60 z-40 sm:hidden" />}
+        <div className="flex-1 flex overflow-hidden relative w-full h-full">
+          
+          {/* Mobile Sidebar Overlay Backdrop */}
+          {mobileSidebarOpen && (
+            <div onClick={() => setMobileSidebarOpen(false)} className="fixed inset-0 bg-black/70 z-40 md:hidden backdrop-blur-xs transition-opacity duration-300" />
+          )}
 
-          {/* Sidebar */}
-          <aside className={`fixed sm:relative top-0 left-0 h-full w-80 bg-zinc-900 border-r border-zinc-800/80 flex flex-col transition-transform duration-300 z-50 sm:translate-x-0 ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+          {/* Fully Responsive Unified Sidebar */}
+          <aside className={`fixed md:relative top-0 left-0 h-full w-72 sm:w-80 bg-zinc-900 border-r border-zinc-800/80 flex flex-col transition-transform duration-300 ease-in-out z-50 md:translate-x-0 ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
             <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-900">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold text-sm uppercase shrink-0">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold text-sm uppercase shrink-0">
                   {currentUser.charAt(0)}
                 </div>
                 <div className="min-w-0">
-                  <span className="font-bold text-base tracking-tight capitalize truncate block">{currentUser}</span>
-                  <p className="text-xs text-green-500 font-medium flex items-center gap-1">
-                    <Circle size={6} className="fill-current" /> Active
-                  </p>
+                  <span className="font-bold text-sm tracking-tight capitalize truncate block">{currentUser}</span>
+                  <p className="text-[10px] text-green-500 font-medium flex items-center gap-1"><Circle size={5} className="fill-current" /> Online</p>
                 </div>
               </div>
-              <button onClick={handleLogout} className="p-2 rounded-full text-red-500 hover:bg-red-950/30 cursor-pointer">
-                <LogOut size={18} />
-              </button>
+              <div className="flex items-center gap-1">
+                <button onClick={() => setMobileSidebarOpen(false)} className="md:hidden p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400">
+                  <X size={18} />
+                </button>
+                <button onClick={handleLogout} className="p-1.5 rounded-lg text-red-500 hover:bg-red-950/30">
+                  <LogOut size={18} />
+                </button>
+              </div>
             </div>
 
             <div className="flex-1 overflow-y-auto p-2 space-y-1 bg-zinc-900">
-              {contacts.map((contact) => (
-                <button
-                  key={contact.id}
-                  onClick={() => { setActiveContact(contact); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center gap-3 p-3 rounded-2xl text-left transition-all cursor-pointer ${activeContact?.id === contact.id ? 'bg-blue-950/40 text-blue-400 font-medium' : 'hover:bg-zinc-800/40 text-zinc-300'}`}
-                >
-                  <div className="w-11 h-11 rounded-full bg-zinc-800 text-zinc-200 flex items-center justify-center font-bold relative uppercase shrink-0">
-                    {contact.avatar}
-                    <span className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-zinc-900" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold truncate text-zinc-100 capitalize">{contact.name}</p>
-                    <p className="text-xs text-zinc-400 truncate mt-0.5">
-                      {partnerTyping[contact.name] ? 'typing...' : contact.status}
-                    </p>
-                  </div>
-                </button>
-              ))}
+              <p className="text-[10px] font-bold text-zinc-500 uppercase px-3 pt-2 pb-1 tracking-wider">Active Workspace Directory</p>
+              {contacts.length === 0 ? (
+                <p className="text-xs text-zinc-500 text-center py-6">No other users online yet.</p>
+              ) : (
+                contacts.map((contact) => (
+                  <button
+                    key={contact.name}
+                    onClick={() => { setActiveContact(contact); setMobileSidebarOpen(false); }}
+                    className={`w-full flex items-center gap-3 p-2.5 rounded-xl text-left transition-all ${activeContact?.name === contact.name ? 'bg-blue-600/10 text-blue-400 font-medium border-l-4 border-blue-500 pl-1.5' : 'hover:bg-zinc-800/40 text-zinc-300'}`}
+                  >
+                    <div className="w-9 h-9 rounded-full bg-zinc-800 text-zinc-200 flex items-center justify-center text-sm font-bold uppercase shrink-0">
+                      {contact.avatar}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold truncate text-zinc-100 capitalize">{contact.name}</p>
+                      <p className="text-[11px] text-zinc-400 truncate mt-0.5">
+                        {partnerTyping[contact.name] ? 'typing...' : contact.status}
+                      </p>
+                    </div>
+                  </button>
+                ))
+              )}
             </div>
           </aside>
 
-          {/* Main Workspace Frame */}
-          <main className="flex-1 flex flex-col bg-zinc-950 min-w-0">
-            <header className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-900/50 backdrop-blur-md sticky top-0 z-10">
+          {/* Main Chat Area Context viewport */}
+          <main className="flex-1 flex flex-col bg-zinc-950 min-w-0 h-full w-full relative">
+            <header className="p-3 sm:p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-900/40 backdrop-blur-md">
               <div className="flex items-center gap-3 min-w-0">
-                <button onClick={() => setMobileSidebarOpen(true)} className="sm:hidden p-2 rounded-xl text-gray-500 hover:bg-zinc-800 cursor-pointer border border-zinc-800">
-                  <Menu size={20} />
+                <button onClick={() => setMobileSidebarOpen(true)} className="md:hidden p-1.5 rounded-lg text-gray-400 hover:bg-zinc-800 border border-zinc-800">
+                  <Menu size={18} />
                 </button>
-                <div className="w-10 h-10 rounded-full bg-blue-900/40 text-blue-400 flex items-center justify-center font-bold uppercase shrink-0">
+                <div className="w-9 h-9 rounded-full bg-blue-900/40 text-blue-400 flex items-center justify-center font-bold text-sm uppercase shrink-0">
                   {activeContact?.avatar || '?'}
                 </div>
                 <div className="min-w-0">
-                  <h3 className="font-bold text-sm text-zinc-100 capitalize truncate">{activeContact?.name || 'Select Room'}</h3>
-                  <p className="text-xs text-zinc-400 font-medium flex items-center gap-1 mt-0.5">
-                    {isPartnerTypingNow ? (
-                      <span className="text-blue-400 animate-pulse font-semibold">is typing...</span>
-                    ) : (
-                      activeContact?.status || 'Offline'
-                    )}
+                  <h3 className="font-bold text-sm text-zinc-100 capitalize truncate">{activeContact?.name || 'Select Portal Contact'}</h3>
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    {isPartnerTypingNow ? <span className="text-blue-400 animate-pulse font-medium">is typing...</span> : 'Cloud Channel Active'}
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-2 text-blue-400 shrink-0">
-                <button className="p-2 rounded-full hover:bg-zinc-800 cursor-pointer"><Phone size={18} /></button>
-                <button className="p-2 rounded-full hover:bg-zinc-800 cursor-pointer"><Video size={18} /></button>
-                <button className="p-2 rounded-full hover:bg-zinc-800 cursor-pointer"><Info size={18} /></button>
+              <div className="flex items-center gap-1 sm:gap-2 text-zinc-400">
+                <button className="p-1.5 rounded-full hover:bg-zinc-900"><Phone size={16} /></button>
+                <button className="p-1.5 rounded-full hover:bg-zinc-900"><Video size={16} /></button>
+                <button className="p-1.5 rounded-full hover:bg-zinc-900"><Info size={16} /></button>
               </div>
             </header>
 
-            {/* Conversation Log viewport */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-zinc-950">
+            {/* Conversation Log Viewport Container */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-zinc-950/40">
               {activeMessages.map((msg) => {
                 const isMe = msg.sender === currentUser;
                 return (
                   <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                    <span className="text-[10px] font-semibold text-zinc-500 mb-0.5 px-1 uppercase tracking-wider">
+                    <span className="text-[9px] font-bold text-zinc-500 mb-0.5 px-1 uppercase tracking-wider">
                       {isMe ? 'You' : msg.sender}
                     </span>
-                    <div className={`max-w-[75%] px-4 py-2.5 rounded-2xl text-sm shadow-xs ${
+                    <div className={`max-w-[85%] sm:max-w-[75%] px-3.5 py-2 rounded-2xl text-xs sm:text-sm shadow-xs ${
                       isMe ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-zinc-900/90 text-zinc-100 rounded-tl-none border border-zinc-800/60'
                     }`}>
                       <p className="break-words whitespace-pre-wrap">{msg.text}</p>
@@ -332,33 +349,33 @@ export default function Home() {
                 );
               })}
               
-              {/* Animated typing bubble context for Option C */}
               {isPartnerTypingNow && (
-                <div className="flex flex-col items-start animate-fade-in">
-                  <span className="text-[10px] font-semibold text-zinc-500 mb-0.5 px-1 uppercase capitalize">{activeContact?.name}</span>
-                  <div className="bg-zinc-900/90 border border-zinc-800/60 text-zinc-100 px-4 py-3 rounded-2xl rounded-tl-none flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <span className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                    <span className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                <div className="flex flex-col items-start">
+                  <span className="text-[9px] font-bold text-zinc-500 mb-0.5 px-1 uppercase capitalize">{activeContact?.name}</span>
+                  <div className="bg-zinc-900/90 border border-zinc-800/60 text-zinc-100 px-3 py-2 rounded-2xl rounded-tl-none flex items-center gap-1">
+                    <span className="w-1 h-1 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-1 h-1 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-1 h-1 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                   </div>
                 </div>
               )}
               <div ref={chatBottomRef} />
             </div>
 
-            <footer className="p-4 border-t border-zinc-800/80 bg-zinc-900/50 backdrop-blur-md">
-              <div className="flex items-center gap-2">
+            {/* Sticky Input Footer */}
+            <footer className="p-3 sm:p-4 border-t border-zinc-800/80 bg-zinc-900/20 backdrop-blur-md">
+              <div className="flex items-center gap-2 max-w-full">
                 <input 
                   type="text"
                   value={newMessageText}
                   onChange={(e) => handleInputChange(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                  placeholder={activeContact ? `Message ${activeContact.name}...` : "Select a contact to type"}
+                  placeholder={activeContact ? `Message ${activeContact.name}...` : "Select a contact first"}
                   disabled={!activeContact}
-                  className="flex-1 bg-zinc-800 text-zinc-100 px-4 py-2.5 rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all border border-zinc-700"
+                  className="flex-1 bg-zinc-900 text-zinc-100 px-4 py-2 rounded-full text-xs sm:text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 border border-zinc-800 disabled:opacity-50"
                 />
-                <button onClick={handleSendMessage} disabled={!newMessageText.trim() || !activeContact} className="p-2.5 bg-blue-600 text-white rounded-full hover:bg-blue-700 shadow-sm cursor-pointer">
-                  <Send size={16} className="translate-x-[0.5px]" />
+                <button onClick={handleSendMessage} disabled={!newMessageText.trim() || !activeContact} className="p-2 bg-blue-600 text-white rounded-full hover:bg-blue-700 disabled:opacity-40 shrink-0">
+                  <Send size={14} className="translate-x-[0.5px]" />
                 </button>
               </div>
             </footer>
